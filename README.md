@@ -1,0 +1,146 @@
+# 动态模型轨迹预测
+
+这个文件夹包含轨迹预测脚本，用于通过训练好的 GRU 动态代理模型进行 free-run 轨迹预测。
+
+## 目录结构
+
+- `scripts/`：预测入口脚本和 GRU checkpoint 加载逻辑。
+- `datasets/`：用于预测输入的轨迹 CSV 文件。
+- `model_weights/`：训练好的模型权重和训练配置 JSON。
+- `prediction_results/`：预测输出结果。每条轨迹会保存到单独的子文件夹中。
+
+## 模型信息
+
+- 默认模型：`B_exogenous_u_only`
+- 输入变量：`Tano_in, RHano_in, Pano_in, STC_ano, XH2_dry, Tcat_in, RHcat_in, Pcat_in, STC_cat, TCL_in, FR_CL, I`
+- 输出变量：`sa, ua, lambda_airin`
+- 预测方式：先对轨迹做 1 秒重采样，然后从轨迹起点开始进行 free-run 预测。启动阶段使用 `u(0)` 对历史输入做左填充，与 notebook 中的外部轨迹预测逻辑保持一致。
+
+## Python 环境配置
+
+推荐使用独立的 Python 环境运行，避免和系统 Python 或其他项目的依赖冲突。建议 Python 版本使用 `3.10` 或 `3.11`。
+
+下面两种方式任选一种即可：
+
+- 方案 A：使用 conda 管理环境。
+- 方案 B：使用 Python 自带的 `venv` 管理环境。
+
+### 1A. 使用 conda 创建并激活环境
+
+在 PowerShell 或 Anaconda Prompt 中运行：
+
+```powershell
+conda create -n pemfc-dynamic python=3.10 -y
+conda activate pemfc-dynamic
+```
+
+如果已经有自己的环境，也可以直接激活已有环境：
+
+```powershell
+conda activate <你的环境名>
+```
+
+### 1B. 使用 venv 创建并激活环境
+
+如果不使用 conda，也可以用 Python 自带的 `venv`：
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+```
+
+如果 PowerShell 提示禁止执行脚本，可以在当前终端临时放开执行策略后再激活：
+
+```powershell
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope Process
+.\.venv\Scripts\Activate.ps1
+```
+
+以后每次重新打开终端，只需要在本目录重新激活：
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+```
+
+### 2. 安装 Python 包
+
+本目录脚本依赖以下 Python 包：
+
+```powershell
+python -m pip install numpy pandas matplotlib scikit-learn torch
+```
+
+如果需要使用 GPU，请根据本机 CUDA 版本到 PyTorch 官网选择对应安装命令；如果不确定，先使用上面的 CPU 版本即可。
+
+### 3. 验证环境
+
+安装完成后，可以运行下面的命令检查依赖是否可正常导入：
+
+```powershell
+python -c "import numpy, pandas, matplotlib, sklearn, torch; print('Python env OK'); print('torch cuda:', torch.cuda.is_available())"
+```
+
+如果使用 conda，以后每次重新打开终端运行脚本前，先进入项目目录并激活环境：
+
+```powershell
+conda activate pemfc-dynamic
+```
+
+## 运行预测
+
+在项目根目录 `dynamic_trajectory_prediction` 中运行：
+
+```powershell
+python .\scripts\predict_trajectories.py
+```
+
+默认会预测以下目录中的所有 CSV 文件：
+
+```text
+datasets/
+```
+
+只预测某一个 CSV：
+
+```powershell
+python .\scripts\predict_trajectories.py --csv .\datasets\20240625_777_2D_F95.csv
+```
+
+指定自己的数据集文件夹：
+
+```powershell
+python .\scripts\predict_trajectories.py --dataset-dir .\path\to\your_csv_folder
+```
+
+
+## 输出结果
+
+脚本不会在 `prediction_results/` 根目录下保存汇总 CSV。预测结果按轨迹名称分别保存：
+
+```text
+prediction_results/
+    <trajectory_id>/
+    <trajectory_id>_free_run_predictions.csv
+    <trajectory_id>_free_run_metrics.csv
+    <trajectory_id>_free_run_prediction.png
+    <trajectory_id>_free_run_prediction_with_current.png
+    <trajectory_id>_input_trajectories.png
+```
+
+其中：
+
+- `<trajectory_id>_free_run_predictions.csv`：该轨迹的逐时刻预测结果。
+- `<trajectory_id>_free_run_metrics.csv`：该轨迹的预测误差指标；只有输入 CSV 中包含真实 `sa/ua/lambda_airin` 时才有有效指标。
+- `<trajectory_id>_free_run_prediction.png`：该轨迹预测图。
+- `<trajectory_id>_free_run_prediction_with_current.png`：三个预测变量和电流 `I` 的轨迹图。
+- `<trajectory_id>_input_trajectories.png`：12 个输入变量的轨迹图。
+
+预测图使用与 notebook 外部 free-run 预测图一致的 matplotlib 风格：
+
+- 黑色曲线：真实值。
+- 橙色曲线：预测值。
+- 灰色阴影：startup padded 区间。
+- 三个共享时间轴的子图：`sa`、`ua`、`lambda_airin`。
+
+如果输入 CSV 中没有真实的 `sa`、`ua` 或 `lambda_airin`，脚本仍会生成预测值；缺失真值对应的评价指标会自动跳过。

@@ -11,3 +11,7 @@ env/
 
 .DS_Store
 Thumbs.db
+
+# Local data and generated prediction artifacts
+datasets/*
+prediction_results/

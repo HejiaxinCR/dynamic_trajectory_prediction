@@ -29,6 +29,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-path", type=Path, default=DEFAULT_MODEL_PATH, help="Trained GRU checkpoint.")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR, help="Folder for prediction CSVs, metrics, checks, and plots.")
     parser.add_argument("--show-plots", action="store_true", help="Show matplotlib windows while saving plots.")
+    parser.add_argument("--disable-hard-physical-gate", action="store_true", help="Do not force outputs to zero when current or stoichiometry is inactive.")
+    parser.add_argument("--current-threshold", type=float, default=0.0, help="Force outputs to zero when I is at or below this threshold.")
+    parser.add_argument("--stc-threshold", type=float, default=0.0, help="Force outputs to zero when STC_ano or STC_cat is at or below this threshold.")
     return parser.parse_args()
 
 
@@ -45,6 +48,9 @@ def main() -> None:
         data_paths=data_paths,
         output_dir=args.output_dir,
         show_plots=args.show_plots,
+        hard_physical_gate=not args.disable_hard_physical_gate,
+        current_threshold=args.current_threshold,
+        stc_threshold=args.stc_threshold,
     )
     print(f"Predicted trajectories: {prediction_df['trajectory_id'].nunique()}")
     print(f"Prediction rows: {len(prediction_df)}")

@@ -228,6 +228,20 @@ def _feature_row(
     return pd.DataFrame([[values[column] for column in feature_columns]], columns=feature_columns)
 
 
+def _hard_physical_gate_mask(
+    trajectory: pd.DataFrame,
+    current_threshold: float = 0.0,
+    stc_threshold: float = 0.0,
+) -> pd.Series:
+    inactive = pd.Series(False, index=trajectory.index)
+    if "I" in trajectory.columns:
+        inactive |= trajectory["I"].isna() | (trajectory["I"] <= current_threshold)
+    for column in ("STC_ano", "STC_cat"):
+        if column in trajectory.columns:
+            inactive |= trajectory[column].isna() | (trajectory[column] <= stc_threshold)
+    return inactive.fillna(True)
+
+
 def free_run_predict_joint(
     trajectory: pd.DataFrame,
     model: LoadedJointGRURegressor,
@@ -244,6 +258,9 @@ def free_run_predict_joint(
     start_index: int = 0,
     eval_start_index: int = 1,
     clip_physical: bool = True,
+    hard_physical_gate: bool = True,
+    current_threshold: float = 0.0,
+    stc_threshold: float = 0.0,
 ) -> pd.DataFrame:
     target_modes = {target: prediction_mode_for_target(prediction_mode, target) for target in output_columns}
     trajectory = trajectory.sort_values("t").reset_index(drop=True)
@@ -261,8 +278,24 @@ def free_run_predict_joint(
     y_values = trajectory[feedback_output_columns].to_numpy(dtype=float).copy() if feedback_output_columns else np.empty((len(trajectory), 0))
     output_index = {target: i for i, target in enumerate(output_columns)}
     feedback_index = {target: i for i, target in enumerate(feedback_output_columns)}
+    forced_zero_mask = (
+        _hard_physical_gate_mask(trajectory, current_threshold, stc_threshold).to_numpy(dtype=bool)
+        if hard_physical_gate
+        else np.zeros(len(trajectory), dtype=bool)
+    )
+    prediction_values[forced_zero_mask, :] = 0.0
+    if feedback_output_columns:
+        y_values[forced_zero_mask, :] = 0.0
 
     for index in range(start_index, len(trajectory) - 1, stride):
+        end_index = min(index + stride, len(trajectory) - 1)
+        target_slice = slice(index + 1, end_index + 1)
+        if forced_zero_mask[target_slice].all():
+            prediction_values[target_slice, :] = 0.0
+            if feedback_output_columns:
+                y_values[target_slice, :] = 0.0
+            continue
+
         row = _feature_row(
             trajectory,
             y_values,
@@ -287,18 +320,31 @@ def free_run_predict_joint(
                 next_value = max(next_value, 1e-9 if target == "ua" else 0.0)
             next_values[target] = next_value
 
-        end_index = min(index + stride, len(trajectory) - 1)
         for target, next_value in next_values.items():
             prediction_values[index + 1 : end_index + 1, output_index[target]] = next_value
             if target in feedback_index:
                 y_values[index + 1 : end_index + 1, feedback_index[target]] = next_value
+        if forced_zero_mask[target_slice].any():
+            prediction_values[target_slice, :] = np.where(
+                forced_zero_mask[target_slice, None],
+                0.0,
+                prediction_values[target_slice, :],
+            )
+            if feedback_output_columns:
+                y_values[target_slice, :] = np.where(
+                    forced_zero_mask[target_slice, None],
+                    0.0,
+                    y_values[target_slice, :],
+                )
 
-    out = trajectory[["trajectory_id", "source_file", "t", *output_columns]].copy()
+    passthrough_columns = ["I"] if "I" in trajectory.columns else []
+    out = trajectory[["trajectory_id", "source_file", "t", *passthrough_columns, *output_columns]].copy()
     for target in output_columns:
         out[f"{target}_pred"] = prediction_values[:, output_index[target]]
     out["is_warmup"] = np.arange(len(out)) < eval_start_index
     out["is_seed"] = np.arange(len(out)) <= start_index
     out["is_startup_padded"] = bool(pad_start_inputs) & (np.arange(len(out)) <= max_x_lag)
+    out["is_forced_zero"] = forced_zero_mask
     return out
 
 
@@ -324,6 +370,9 @@ def run_prediction(
     data_paths: dict[str, str | Path],
     output_dir: str | Path,
     show_plots: bool = False,
+    hard_physical_gate: bool = True,
+    current_threshold: float = 0.0,
+    stc_threshold: float = 0.0,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     with open(model_config_path, "r", encoding="utf-8") as f:
         saved_config = json.load(f)
@@ -382,6 +431,9 @@ def run_prediction(
             pad_start_inputs=True,
             start_index=0,
             eval_start_index=1,
+            hard_physical_gate=hard_physical_gate,
+            current_threshold=current_threshold,
+            stc_threshold=stc_threshold,
         )
         pred["model"] = model_name
         pred["split"] = "external"
@@ -404,13 +456,14 @@ def run_prediction(
                 record["evaluation_scope"] = "full_from_t0"
                 metric_records.append(record)
                 trajectory_metric_records.append(record)
-            lower_bound = 1e-9 if target == "ua" else 0.0
+            lower_bound = 0.0
             check = {
                 "trajectory_id": trajectory_id,
                 "model": model_name,
                 "check": f"{target}_physical_lower_bound",
                 "passed": bool((pred[f"{target}_pred"] >= lower_bound).all()),
                 "min_value": float(pred[f"{target}_pred"].min()),
+                "forced_zero_rows": int(pred["is_forced_zero"].sum()),
             }
             checks.append(check)
 

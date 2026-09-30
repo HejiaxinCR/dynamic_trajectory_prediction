@@ -71,6 +71,12 @@ Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope Process
 python -m pip install numpy pandas matplotlib scikit-learn torch
 ```
 
+如果需要直接输入原始导出的 TSV 文件，还需要安装 SciPy，用于 `STC_ano` 插值：
+
+```powershell
+python -m pip install scipy
+```
+
 如果需要使用 GPU，请根据本机 CUDA 版本到 PyTorch 官网选择对应安装命令；如果不确定，先使用上面的 CPU 版本即可。
 
 ### 3. 验证环境
@@ -78,7 +84,7 @@ python -m pip install numpy pandas matplotlib scikit-learn torch
 安装完成后，可以运行下面的命令检查依赖是否可正常导入：
 
 ```powershell
-python -c "import numpy, pandas, matplotlib, sklearn, torch; print('Python env OK'); print('torch cuda:', torch.cuda.is_available())"
+python -c "import numpy, pandas, matplotlib, sklearn, scipy, torch; print('Python env OK'); print('torch cuda:', torch.cuda.is_available())"
 ```
 
 如果使用 conda，以后每次重新打开终端运行脚本前，先进入项目目录并激活环境：
@@ -105,6 +111,24 @@ datasets/
 
 ```powershell
 python .\scripts\predict_trajectories.py --csv .\datasets\20240625_777_2D_F95.csv
+```
+
+直接预测原始导出的 TSV 文件：
+
+```powershell
+python .\scripts\predict_trajectories.py --tsv .\datasets\your_export.tsv
+```
+
+脚本会先调用 `scripts/interpolate_stc.py`，把 TSV 转换为代理模型需要的轨迹 CSV 格式，然后再预测。转换后的 CSV 默认保存到：
+
+```text
+prediction_results/_converted_inputs/
+```
+
+如需指定转换后 CSV 的保存位置：
+
+```powershell
+python .\scripts\predict_trajectories.py --tsv .\datasets\your_export.tsv --converted-dir .\datasets\converted
 ```
 
 指定自己的数据集文件夹：

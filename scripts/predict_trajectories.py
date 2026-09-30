@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 
 from dynamic_gru_predictor import run_prediction
+from interpolate_stc import run as convert_export_to_csv
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -21,13 +22,26 @@ def _discover_csvs(dataset_dir: Path) -> dict[str, Path]:
     return {path.stem: path for path in paths}
 
 
+def _convert_tsvs(tsv_paths: list[Path], converted_dir: Path) -> dict[str, Path]:
+    converted_dir.mkdir(parents=True, exist_ok=True)
+    converted_paths = {}
+    for tsv_path in tsv_paths:
+        output_path = converted_dir / f"{tsv_path.stem}.csv"
+        converted = convert_export_to_csv(str(tsv_path), str(output_path))
+        print(f"Converted {tsv_path} -> {output_path} ({len(converted)} rows)")
+        converted_paths[tsv_path.stem] = output_path
+    return converted_paths
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run dynamic GRU free-run trajectory prediction.")
     parser.add_argument("--dataset-dir", type=Path, default=DEFAULT_DATASET_DIR, help="Folder containing input trajectory CSV files.")
     parser.add_argument("--csv", type=Path, action="append", default=None, help="Specific CSV to predict. Can be passed multiple times.")
+    parser.add_argument("--tsv", type=Path, action="append", default=None, help="Raw exported TSV to convert to trajectory CSV before prediction. Can be passed multiple times.")
     parser.add_argument("--model-config", type=Path, default=DEFAULT_MODEL_CONFIG, help="Training config JSON exported by the notebook.")
     parser.add_argument("--model-path", type=Path, default=DEFAULT_MODEL_PATH, help="Trained GRU checkpoint.")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR, help="Folder for prediction CSVs, metrics, checks, and plots.")
+    parser.add_argument("--converted-dir", type=Path, default=None, help="Folder for converted TSV inputs. Defaults to <output-dir>/_converted_inputs.")
     parser.add_argument("--show-plots", action="store_true", help="Show matplotlib windows while saving plots.")
     parser.add_argument("--disable-hard-physical-gate", action="store_true", help="Do not force outputs to zero when current or stoichiometry is inactive.")
     parser.add_argument("--current-threshold", type=float, default=0.0, help="Force outputs to zero when I is at or below this threshold.")
@@ -37,9 +51,13 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    data_paths = {}
     if args.csv:
-        data_paths = {path.stem: path for path in args.csv}
-    else:
+        data_paths.update({path.stem: path for path in args.csv})
+    if args.tsv:
+        converted_dir = args.converted_dir or (args.output_dir / "_converted_inputs")
+        data_paths.update(_convert_tsvs(args.tsv, converted_dir))
+    if not data_paths:
         data_paths = _discover_csvs(args.dataset_dir)
 
     prediction_df, metrics_df, checks_df = run_prediction(

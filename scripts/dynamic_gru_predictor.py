@@ -27,9 +27,8 @@ PLOT_YLABELS = {
     "I": "Current (A)",
     "sa": "Anode saturation (-)",
     "ua": "Anode velocity (m/s)",
-    "lambda_airin": "Air inlet stoichiometry (-)",
+    "lambda_airin": "Air in water content (-)",
 }
-
 
 def lag_sequence(max_lag: int, mode: str = "sparse") -> list[int]:
     if max_lag < 0:
@@ -242,6 +241,12 @@ def _hard_physical_gate_mask(
     return inactive.fillna(True)
 
 
+def _sa_hard_zero_mask(trajectory: pd.DataFrame, sa_current_threshold: float = 53.0) -> pd.Series:
+    if "I" not in trajectory.columns:
+        return pd.Series(False, index=trajectory.index)
+    return (trajectory["I"].isna() | (trajectory["I"] < sa_current_threshold)).fillna(True)
+
+
 def free_run_predict_joint(
     trajectory: pd.DataFrame,
     model: LoadedJointGRURegressor,
@@ -261,6 +266,8 @@ def free_run_predict_joint(
     hard_physical_gate: bool = True,
     current_threshold: float = 0.0,
     stc_threshold: float = 0.0,
+    sa_hard_zero_gate: bool = True,
+    sa_current_threshold: float = 53.0,
 ) -> pd.DataFrame:
     target_modes = {target: prediction_mode_for_target(prediction_mode, target) for target in output_columns}
     trajectory = trajectory.sort_values("t").reset_index(drop=True)
@@ -286,6 +293,16 @@ def free_run_predict_joint(
     prediction_values[forced_zero_mask, :] = 0.0
     if feedback_output_columns:
         y_values[forced_zero_mask, :] = 0.0
+
+    sa_zero_mask = (
+        _sa_hard_zero_mask(trajectory, sa_current_threshold).to_numpy(dtype=bool)
+        if sa_hard_zero_gate and "sa" in output_columns
+        else np.zeros(len(trajectory), dtype=bool)
+    )
+    if "sa" in output_index:
+        prediction_values[sa_zero_mask, output_index["sa"]] = 0.0
+    if "sa" in feedback_index:
+        y_values[sa_zero_mask, feedback_index["sa"]] = 0.0
 
     for index in range(start_index, len(trajectory) - 1, stride):
         end_index = min(index + stride, len(trajectory) - 1)
@@ -336,6 +353,17 @@ def free_run_predict_joint(
                     0.0,
                     y_values[target_slice, :],
                 )
+        if sa_zero_mask[target_slice].any():
+            if "sa" in output_index:
+                sa_col = output_index["sa"]
+                prediction_values[target_slice, sa_col] = np.where(
+                    sa_zero_mask[target_slice], 0.0, prediction_values[target_slice, sa_col]
+                )
+            if "sa" in feedback_index:
+                sa_fb_col = feedback_index["sa"]
+                y_values[target_slice, sa_fb_col] = np.where(
+                    sa_zero_mask[target_slice], 0.0, y_values[target_slice, sa_fb_col]
+                )
 
     passthrough_columns = ["I"] if "I" in trajectory.columns else []
     out = trajectory[["trajectory_id", "source_file", "t", *passthrough_columns, *output_columns]].copy()
@@ -373,6 +401,8 @@ def run_prediction(
     hard_physical_gate: bool = True,
     current_threshold: float = 0.0,
     stc_threshold: float = 0.0,
+    sa_hard_zero_gate: bool = True,
+    sa_current_threshold: float = 53.0,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     with open(model_config_path, "r", encoding="utf-8") as f:
         saved_config = json.load(f)
@@ -388,16 +418,14 @@ def run_prediction(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     model = LoadedJointGRURegressor(model_path, input_columns)
-    feature_columns = saved_config.get("feature_columns_by_model", {}).get(model_name)
-    if feature_columns is None:
-        feature_columns = [
-            column
-            for lag in sorted(model.lags, reverse=True)
-            for column in [
-                *(f"{name}_xlag{lag}" for name in input_columns),
-                *(f"{name}_ylag{lag}" for name in model.feedback_output_columns),
-            ]
+    feature_columns = [
+        column
+        for lag in sorted(model.lags, reverse=True)
+        for column in [
+            *(f"{name}_xlag{lag}" for name in input_columns),
+            *(f"{name}_ylag{lag}" for name in model.feedback_output_columns),
         ]
+    ]
     prediction_mode = saved_config.get(
         "exogenous_prediction_mode",
         {target: "absolute" for target in output_columns},
@@ -434,6 +462,8 @@ def run_prediction(
             hard_physical_gate=hard_physical_gate,
             current_threshold=current_threshold,
             stc_threshold=stc_threshold,
+            sa_hard_zero_gate=sa_hard_zero_gate,
+            sa_current_threshold=sa_current_threshold,
         )
         pred["model"] = model_name
         pred["split"] = "external"

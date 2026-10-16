@@ -1,5 +1,5 @@
 """
-Convert exported PEMFC data to trajectory CSV format and interpolate STC_ano.
+Convert exported PEMFC data to trajectory CSV format and preprocess inputs.
 
 Usage:
     python interpolate_stc.py --input "data/to wenwen.tsv" --output data/to_wenwen_converted.csv
@@ -10,6 +10,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from scipy.interpolate import griddata
+from scipy.signal import savgol_filter
 
 
 CURRENTS = np.array([43.4, 83.1, 120.1, 160.2, 210.4, 250.3, 300.8, 350.7, 411.1, 450.1, 480.7])
@@ -22,6 +23,13 @@ DATA_OPCON2_0 = {
 CURRENT_COL = "FuCellElec_iStckAct"
 ARB_SPEED_COL = "Com_nP1ActSpd"
 ARB_SPEED_SCALE = 1e4
+RAW_PRESSURE_SOURCES = {
+    "Pano_in": [r"PAndeDs_p_f\XETK:1", "PAndeUs_p_f"],
+    "Pcat_in": ["PCtdeUs_p_f"],
+}
+PRESSURE_COLUMNS = ["Pano_in", "Pcat_in"]
+PRESSURE_FILTER_WINDOW = 60
+PRESSURE_FILTER_POLYORDER = 3
 OUTPUT_COL = "STC_ano"
 TARGET_COLUMNS = [
     "t",
@@ -54,6 +62,22 @@ SOURCE_TO_TARGET = {
     "FuCellAir_ratLamCtdeAct": "STC_cat",
 }
 REQUIRED_SOURCE_COLUMNS = list(dict.fromkeys([*SOURCE_TO_TARGET.keys(), ARB_SPEED_COL]))
+REQUIRED_TRAJECTORY_COLUMNS = TARGET_COLUMNS.copy()
+REQUIRED_TRAJECTORY_INPUT_COLUMNS = [
+    "t",
+    "Tano_in",
+    "RHano_in",
+    "Pano_in",
+    "STC_ano",
+    "XH2_dry",
+    "Tcat_in",
+    "RHcat_in",
+    "Pcat_in",
+    "STC_cat",
+    "TCL_in",
+    "FR_CL",
+    "I",
+]
 
 
 def build_known_points():
@@ -78,9 +102,89 @@ def safe_griddata(known_points, known_values, target_points):
     return interpolated_values
 
 
+def smooth_pressure(series: pd.Series) -> pd.Series:
+    pressure = pd.to_numeric(series, errors="coerce")
+    if pressure.isna().all():
+        return pressure
+
+    filled_pressure = pressure.interpolate(limit_direction="both")
+    window_length = min(PRESSURE_FILTER_WINDOW, len(filled_pressure))
+    if window_length <= PRESSURE_FILTER_POLYORDER:
+        return filled_pressure
+
+    try:
+        smoothed = savgol_filter(
+            filled_pressure.to_numpy(),
+            window_length=window_length,
+            polyorder=PRESSURE_FILTER_POLYORDER,
+        )
+    except ValueError:
+        if window_length % 2 == 0 and window_length - 1 > PRESSURE_FILTER_POLYORDER:
+            smoothed = savgol_filter(
+                filled_pressure.to_numpy(),
+                window_length=window_length - 1,
+                polyorder=PRESSURE_FILTER_POLYORDER,
+            )
+        else:
+            raise
+    return pd.Series(smoothed, index=series.index)
+
+
+def apply_raw_pressure_source(df: pd.DataFrame, converted: pd.DataFrame) -> None:
+    for target_col, source_cols in RAW_PRESSURE_SOURCES.items():
+        for source_col in source_cols:
+            if source_col in df.columns:
+                converted[target_col] = df[source_col]
+                break
+
+
 def read_input(input_path: str) -> pd.DataFrame:
     separator = "\t" if Path(input_path).suffix.lower() == ".tsv" else ","
-    return pd.read_csv(input_path, sep=separator)
+    return pd.read_csv(input_path, sep=separator, low_memory=False)
+
+
+def normalize_blank_strings(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    text_columns = df.select_dtypes(include=["object", "string"]).columns
+    for column in text_columns:
+        blank_mask = df[column].astype("string").str.fullmatch(r"\s*", na=False)
+        df.loc[blank_mask, column] = np.nan
+    return df
+
+
+def drop_missing_input_rows(df: pd.DataFrame) -> pd.DataFrame:
+    df = normalize_blank_strings(df)
+    return df.dropna(subset=REQUIRED_SOURCE_COLUMNS).reset_index(drop=True)
+
+
+def drop_missing_trajectory_rows(df: pd.DataFrame) -> pd.DataFrame:
+    df = normalize_blank_strings(df)
+    df = coerce_numeric_columns(df, TARGET_COLUMNS)
+    return df.dropna(subset=REQUIRED_TRAJECTORY_INPUT_COLUMNS).reset_index(drop=True)
+
+
+def has_columns(df: pd.DataFrame, columns: list[str]) -> bool:
+    return set(columns).issubset(df.columns)
+
+
+def detect_input_format(df: pd.DataFrame) -> str:
+    if has_columns(df, REQUIRED_SOURCE_COLUMNS):
+        return "raw"
+    if has_columns(df, REQUIRED_TRAJECTORY_COLUMNS):
+        return "trajectory"
+    missing_raw = sorted(set(REQUIRED_SOURCE_COLUMNS) - set(df.columns))
+    missing_trajectory = sorted(set(REQUIRED_TRAJECTORY_COLUMNS) - set(df.columns))
+    raise ValueError(
+        "Input is neither raw export format nor trajectory format. "
+        f"Missing raw columns: {missing_raw}; missing trajectory columns: {missing_trajectory}"
+    )
+
+
+def coerce_numeric_columns(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    df = df.copy()
+    for column in columns:
+        df[column] = pd.to_numeric(df[column], errors="coerce")
+    return df
 
 
 def interpolate_stc_ano(df: pd.DataFrame) -> np.ndarray:
@@ -102,7 +206,7 @@ def interpolate_stc_ano(df: pd.DataFrame) -> np.ndarray:
     valid_stc = safe_griddata(points, values, target_points)
 
     current_zero_mask = current_target == 0
-    valid_stc[current_zero_mask] = 0
+    valid_stc[current_zero_mask] = 10
 
     zero_stc_with_current_mask = (current_target != 0) & (valid_stc == 0)
     valid_stc = (
@@ -119,14 +223,41 @@ def interpolate_stc_ano(df: pd.DataFrame) -> np.ndarray:
     return stc
 
 
-def convert_to_trajectory_format(df: pd.DataFrame) -> pd.DataFrame:
+def clean_stc_cat(converted: pd.DataFrame) -> pd.Series:
+    stc_cat = converted["STC_cat"].astype(float).copy()
+    current = converted["I"].astype(float)
+
+    current_zero_mask = current == 0
+    active_zero_stc_mask = (current != 0) & (stc_cat == 0)
+    previous_valid_stc = stc_cat.mask(current_zero_mask | active_zero_stc_mask).ffill()
+
+    stc_cat = stc_cat.mask(active_zero_stc_mask, previous_valid_stc).fillna(stc_cat)
+    stc_cat[current_zero_mask] = 10
+    return stc_cat
+
+
+def preprocess_trajectory_dataset(df: pd.DataFrame) -> pd.DataFrame:
+    preprocessed = df.copy()
+    preprocessed = coerce_numeric_columns(preprocessed, TARGET_COLUMNS)
+
+    for pressure_col in PRESSURE_COLUMNS:
+        preprocessed[pressure_col] = smooth_pressure(preprocessed[pressure_col]).fillna(preprocessed[pressure_col])
+
+    preprocessed["I"] = preprocessed["I"].clip(lower=0)
+    preprocessed["STC_cat"] = clean_stc_cat(preprocessed)
+    return preprocessed[TARGET_COLUMNS]
+
+
+def convert_raw_to_trajectory_format(df: pd.DataFrame) -> pd.DataFrame:
     converted = pd.DataFrame(index=df.index)
     for source_col, target_col in SOURCE_TO_TARGET.items():
         converted[target_col] = df[source_col]
 
+    apply_raw_pressure_source(df, converted)
+
     converted["Pano_in"] = converted["Pano_in"] / 1000
     converted["Pcat_in"] = converted["Pcat_in"] / 1000
-    converted["I"] = df[CURRENT_COL].clip(lower=0)
+    converted["I"] = df[CURRENT_COL]
     converted[OUTPUT_COL] = interpolate_stc_ano(df)
     converted["RHano_in"] = 0.85
     converted["XH2_dry"] = 0.9
@@ -139,10 +270,17 @@ def convert_to_trajectory_format(df: pd.DataFrame) -> pd.DataFrame:
 
 def run(input_path: str, output_path: str) -> pd.DataFrame:
     df = read_input(input_path)
-    df = df.dropna(subset=REQUIRED_SOURCE_COLUMNS).reset_index(drop=True)
-    converted = convert_to_trajectory_format(df)
-    converted.to_csv(output_path, index=False)
-    return converted
+    input_format = detect_input_format(df)
+
+    if input_format == "raw":
+        df = drop_missing_input_rows(df)
+        trajectory = convert_raw_to_trajectory_format(df)
+    else:
+        trajectory = drop_missing_trajectory_rows(df)
+
+    preprocessed = preprocess_trajectory_dataset(trajectory)
+    preprocessed.to_csv(output_path, index=False)
+    return preprocessed
 
 
 def parse_args():
@@ -155,4 +293,4 @@ def parse_args():
 if __name__ == "__main__":
     args = parse_args()
     result_df = run(args.input, args.output)
-    print(f"Saved converted trajectory CSV to: {args.output}, rows: {len(result_df)}")
+    print(f"Saved preprocessed trajectory CSV to: {args.output}, rows: {len(result_df)}")

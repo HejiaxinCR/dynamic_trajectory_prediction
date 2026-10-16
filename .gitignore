@@ -15,3 +15,5 @@ Thumbs.db
 # Local data and generated prediction artifacts
 datasets/*
 prediction_results/
+scripts/plot_prediction_window.py
+.vscode/settings.json

@@ -241,10 +241,39 @@ def _hard_physical_gate_mask(
     return inactive.fillna(True)
 
 
-def _sa_hard_zero_mask(trajectory: pd.DataFrame, sa_current_threshold: float = 53.0) -> pd.Series:
-    if "I" not in trajectory.columns:
-        return pd.Series(False, index=trajectory.index)
-    return (trajectory["I"].isna() | (trajectory["I"] < sa_current_threshold)).fillna(True)
+# Inclusive valid ranges for sa; None leaves that bound unrestricted.
+SA_VALID_RANGES = {
+    "I": {"lower": 53.0, "upper": None},
+    "Tano_in": {"lower": None, "upper": None},
+    "RHano_in": {"lower": None, "upper": None},
+    "Pano_in": {"lower": None, "upper": None},
+    "STC_ano": {"lower": None, "upper": None},
+    "XH2_dry": {"lower": None, "upper": None},
+    "Tcat_in": {"lower": None, "upper": None},
+    "RHcat_in": {"lower": None, "upper": None},
+    "Pcat_in": {"lower": None, "upper": None},
+    "STC_cat": {"lower": None, "upper": None},
+    "TCL_in": {"lower": None, "upper": None},
+    "FR_CL": {"lower": None, "upper": None}
+}
+
+
+def _sa_hard_zero_mask(trajectory: pd.DataFrame) -> pd.Series:
+    zero_mask = pd.Series(False, index=trajectory.index)
+    for column, bounds in SA_VALID_RANGES.items():
+        if column not in trajectory.columns:
+            continue  # Preserve the existing behavior for missing columns.
+
+        values = trajectory[column]
+        invalid = values.isna()
+        if bounds["lower"] is not None:
+            invalid |= values < bounds["lower"]
+        if bounds["upper"] is not None:
+            invalid |= values > bounds["upper"]
+
+        zero_mask |= invalid.fillna(True)
+
+    return zero_mask
 
 
 def free_run_predict_joint(
@@ -267,7 +296,6 @@ def free_run_predict_joint(
     current_threshold: float = 0.0,
     stc_threshold: float = 0.0,
     sa_hard_zero_gate: bool = True,
-    sa_current_threshold: float = 53.0,
 ) -> pd.DataFrame:
     target_modes = {target: prediction_mode_for_target(prediction_mode, target) for target in output_columns}
     trajectory = trajectory.sort_values("t").reset_index(drop=True)
@@ -295,7 +323,7 @@ def free_run_predict_joint(
         y_values[forced_zero_mask, :] = 0.0
 
     sa_zero_mask = (
-        _sa_hard_zero_mask(trajectory, sa_current_threshold).to_numpy(dtype=bool)
+        _sa_hard_zero_mask(trajectory).to_numpy(dtype=bool)
         if sa_hard_zero_gate and "sa" in output_columns
         else np.zeros(len(trajectory), dtype=bool)
     )
@@ -402,7 +430,6 @@ def run_prediction(
     current_threshold: float = 0.0,
     stc_threshold: float = 0.0,
     sa_hard_zero_gate: bool = True,
-    sa_current_threshold: float = 53.0,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     with open(model_config_path, "r", encoding="utf-8") as f:
         saved_config = json.load(f)
@@ -463,7 +490,6 @@ def run_prediction(
             current_threshold=current_threshold,
             stc_threshold=stc_threshold,
             sa_hard_zero_gate=sa_hard_zero_gate,
-            sa_current_threshold=sa_current_threshold,
         )
         pred["model"] = model_name
         pred["split"] = "external"

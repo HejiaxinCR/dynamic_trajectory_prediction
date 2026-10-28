@@ -10,7 +10,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from scipy.interpolate import griddata
-from scipy.signal import savgol_filter
+
+from trajectory_preprocessing import ARB_SPEED_COLUMN, preprocess_trajectory_dataset
 
 
 CURRENTS = np.array([43.4, 83.1, 120.1, 160.2, 210.4, 250.3, 300.8, 350.7, 411.1, 450.1, 480.7])
@@ -21,15 +22,12 @@ DATA_OPCON2_0 = {
 }
 
 CURRENT_COL = "FuCellElec_iStckAct"
-ARB_SPEED_COL = "Com_nP1ActSpd"
+ARB_SPEED_COL = ARB_SPEED_COLUMN
 ARB_SPEED_SCALE = 1e4
 RAW_PRESSURE_SOURCES = {
     "Pano_in": [r"PAndeDs_p_f\XETK:1", "PAndeUs_p_f"],
     "Pcat_in": ["PCtdeUs_p_f"],
 }
-PRESSURE_COLUMNS = ["Pano_in", "Pcat_in"]
-PRESSURE_FILTER_WINDOW = 60
-PRESSURE_FILTER_POLYORDER = 3
 OUTPUT_COL = "STC_ano"
 TARGET_COLUMNS = [
     "t",
@@ -100,34 +98,6 @@ def safe_griddata(known_points, known_values, target_points):
         nearest_values = griddata(known_points, known_values, target_points[nan_indices], method="nearest")
         interpolated_values[nan_indices] = nearest_values
     return interpolated_values
-
-
-def smooth_pressure(series: pd.Series) -> pd.Series:
-    pressure = pd.to_numeric(series, errors="coerce")
-    if pressure.isna().all():
-        return pressure
-
-    filled_pressure = pressure.interpolate(limit_direction="both")
-    window_length = min(PRESSURE_FILTER_WINDOW, len(filled_pressure))
-    if window_length <= PRESSURE_FILTER_POLYORDER:
-        return filled_pressure
-
-    try:
-        smoothed = savgol_filter(
-            filled_pressure.to_numpy(),
-            window_length=window_length,
-            polyorder=PRESSURE_FILTER_POLYORDER,
-        )
-    except ValueError:
-        if window_length % 2 == 0 and window_length - 1 > PRESSURE_FILTER_POLYORDER:
-            smoothed = savgol_filter(
-                filled_pressure.to_numpy(),
-                window_length=window_length - 1,
-                polyorder=PRESSURE_FILTER_POLYORDER,
-            )
-        else:
-            raise
-    return pd.Series(smoothed, index=series.index)
 
 
 def apply_raw_pressure_source(df: pd.DataFrame, converted: pd.DataFrame) -> None:
@@ -205,47 +175,8 @@ def interpolate_stc_ano(df: pd.DataFrame) -> np.ndarray:
 
     valid_stc = safe_griddata(points, values, target_points)
 
-    current_zero_mask = current_target == 0
-    valid_stc[current_zero_mask] = 10
-
-    zero_stc_with_current_mask = (current_target != 0) & (valid_stc == 0)
-    valid_stc = (
-        pd.Series(valid_stc, index=valid_df.index)
-        .mask(zero_stc_with_current_mask)
-        .ffill()
-        .to_numpy()
-    )
-
-    # ARB speed equal to 0 means STC has no physical meaning here.
-    arb_zero_mask = valid_df[ARB_SPEED_COL].to_numpy() == 0
-    valid_stc[arb_zero_mask] = 0
     stc[valid_mask.to_numpy()] = valid_stc
     return stc
-
-
-def clean_stc_cat(converted: pd.DataFrame) -> pd.Series:
-    stc_cat = converted["STC_cat"].astype(float).copy()
-    current = converted["I"].astype(float)
-
-    current_zero_mask = current == 0
-    active_zero_stc_mask = (current != 0) & (stc_cat == 0)
-    previous_valid_stc = stc_cat.mask(current_zero_mask | active_zero_stc_mask).ffill()
-
-    stc_cat = stc_cat.mask(active_zero_stc_mask, previous_valid_stc).fillna(stc_cat)
-    stc_cat[current_zero_mask] = 10
-    return stc_cat
-
-
-def preprocess_trajectory_dataset(df: pd.DataFrame) -> pd.DataFrame:
-    preprocessed = df.copy()
-    preprocessed = coerce_numeric_columns(preprocessed, TARGET_COLUMNS)
-
-    for pressure_col in PRESSURE_COLUMNS:
-        preprocessed[pressure_col] = smooth_pressure(preprocessed[pressure_col]).fillna(preprocessed[pressure_col])
-
-    preprocessed["I"] = preprocessed["I"].clip(lower=0)
-    preprocessed["STC_cat"] = clean_stc_cat(preprocessed)
-    return preprocessed[TARGET_COLUMNS]
 
 
 def convert_raw_to_trajectory_format(df: pd.DataFrame) -> pd.DataFrame:
@@ -259,16 +190,18 @@ def convert_raw_to_trajectory_format(df: pd.DataFrame) -> pd.DataFrame:
     converted["Pcat_in"] = converted["Pcat_in"] / 1000
     converted["I"] = df[CURRENT_COL]
     converted[OUTPUT_COL] = interpolate_stc_ano(df)
-    converted["RHano_in"] = 0.85
-    converted["XH2_dry"] = 0.9
+    converted["RHano_in"] = 0.65
+    converted["XH2_dry"] = 0.85
     converted["sa"] = np.nan
     converted["ua"] = np.nan
     converted["lambda_airin"] = np.nan
+    # Keep the source speed so shared preprocessing can retain the stop rule.
+    converted[ARB_SPEED_COL] = df[ARB_SPEED_COL]
 
-    return converted[TARGET_COLUMNS]
+    return converted[[*TARGET_COLUMNS, ARB_SPEED_COL]]
 
 
-def run(input_path: str, output_path: str) -> pd.DataFrame:
+def run(input_path: str, output_path: str, *, preprocess: bool = True) -> pd.DataFrame:
     df = read_input(input_path)
     input_format = detect_input_format(df)
 
@@ -278,9 +211,9 @@ def run(input_path: str, output_path: str) -> pd.DataFrame:
     else:
         trajectory = drop_missing_trajectory_rows(df)
 
-    preprocessed = preprocess_trajectory_dataset(trajectory)
-    preprocessed.to_csv(output_path, index=False)
-    return preprocessed
+    result = preprocess_trajectory_dataset(trajectory) if preprocess else trajectory
+    result.to_csv(output_path, index=False)
+    return result
 
 
 def parse_args():

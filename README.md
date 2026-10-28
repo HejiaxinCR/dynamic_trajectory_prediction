@@ -68,10 +68,10 @@ Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope Process
 本目录脚本依赖以下 Python 包：
 
 ```powershell
-python -m pip install numpy pandas matplotlib scikit-learn torch
+python -m pip install numpy pandas matplotlib scikit-learn scipy torch
 ```
 
-如果需要直接输入原始导出的 TSV 文件，还需要安装 SciPy，用于 `STC_ano` 插值：
+SciPy 用于 CSV/TSV 的压力平滑，以及原始 TSV 的 `STC_ano` 插值：
 
 ```powershell
 python -m pip install scipy
@@ -138,6 +138,19 @@ python .\scripts\predict_trajectories.py --dataset-dir .\path\to\your_csv_folder
 ```
 
 
+## 输入预处理
+
+CSV（包括自动发现的数据集）和 TSV 均在预测读取阶段、重采样之前执行同一套预处理：
+
+- `Pano_in`、`Pcat_in`：Savitzky–Golay 平滑，窗口 60 个采样点、三阶多项式；短轨迹自动缩短窗口。
+- `I`：负值截断为 0。
+- `STC_ano`、`STC_cat`：电流为 0 时设为 10；电流非 0 且 STC 为 0 时，用前一有效 STC 填充，无前值时保留 0。
+- 原始 TSV 转换后保留 `Com_nP1ActSpd` 列；存在该列时，ARB 转速为 0 的 `STC_ano` 最终仍置为 0。标准 CSV 缺少转速时仅执行通用规则。
+
+公共规则位于 `scripts/trajectory_preprocessing.py`。预测入口的 TSV 转换仅转换格式和插值，随后统一预处理，避免一次运行中重复平滑。单独运行 `interpolate_stc.py` 仍默认输出预处理后的数据；预测时应输入未平滑的轨迹，避免再次平滑。
+
+这些操作不会改写源数据集；已有预测结果和片段图需要重新运行才能更新。冷却流量 `FR_CL` 不做额外单位换算。
+
 ## 输出结果
 
 脚本不会在 `prediction_results/` 根目录下保存汇总 CSV。预测结果按轨迹名称分别保存：
@@ -150,6 +163,7 @@ prediction_results/
     <trajectory_id>_free_run_prediction.png
     <trajectory_id>_free_run_prediction_with_current.png
     <trajectory_id>_input_trajectories.png
+    <trajectory_id>_free_run_ua_sa_criteria.png
 ```
 
 其中：
@@ -159,6 +173,7 @@ prediction_results/
 - `<trajectory_id>_free_run_prediction.png`：该轨迹预测图。
 - `<trajectory_id>_free_run_prediction_with_current.png`：三个预测变量和电流 `I` 的轨迹图。
 - `<trajectory_id>_input_trajectories.png`：12 个输入变量的轨迹图。
+- `<trajectory_id>_free_run_ua_sa_criteria.png`：`ua_pred–sa_pred` 阈值分区散点图；存在成对真实值时叠加空心圆对照。阈值点为 `(0.5, 0.032)`、`(1.5, 0.062)`、`(2.5, 0.092)`，第二条阈值线上移 `0.015`，依次填充绿、蓝、红三个区域。分区仅覆盖 `ua=0.5～2.5`，显示范围为 `ua=0～6`、`sa=0～0.16`，范围外的点不显示。
 
 预测图使用与 notebook 外部 free-run 预测图一致的 matplotlib 风格：
 

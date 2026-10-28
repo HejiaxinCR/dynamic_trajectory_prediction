@@ -27,7 +27,7 @@ def _convert_tsvs(tsv_paths: list[Path], converted_dir: Path) -> dict[str, Path]
     converted_paths = {}
     for tsv_path in tsv_paths:
         output_path = converted_dir / f"{tsv_path.stem}.csv"
-        converted = convert_export_to_csv(str(tsv_path), str(output_path))
+        converted = convert_export_to_csv(str(tsv_path), str(output_path), preprocess=False)
         print(f"Converted {tsv_path} -> {output_path} ({len(converted)} rows)")
         converted_paths[tsv_path.stem] = output_path
     return converted_paths

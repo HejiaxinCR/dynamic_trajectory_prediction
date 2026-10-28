@@ -11,6 +11,8 @@ import torch.nn as nn
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.preprocessing import StandardScaler
 
+from trajectory_preprocessing import ARB_SPEED_COLUMN, preprocess_trajectory_dataset
+
 
 PLOT_YLABELS = {
     "Tano_in": "Temperature (degC)",
@@ -162,15 +164,15 @@ def read_trajectory(path: str | Path, trajectory_id: str, input_columns: list[st
     for column in output_columns:
         if column not in df.columns:
             df[column] = np.nan
-    df = df[["t", *input_columns, *output_columns]].copy()
+    optional_columns = [ARB_SPEED_COLUMN] if ARB_SPEED_COLUMN in df.columns else []
+    df = df[["t", *input_columns, *output_columns, *optional_columns]].copy()
     for column in df.columns:
         df[column] = pd.to_numeric(df[column], errors="coerce")
-    # if "STC_ano" in df.columns:
-    #     df.loc[df["STC_ano"] == 0, "STC_ano"] = 1.6
     df = df.dropna(subset=required_inputs).copy()
     df["trajectory_id"] = trajectory_id
     df["source_file"] = path.name
-    return df.sort_values("t").drop_duplicates("t", keep="first").reset_index(drop=True)
+    df = df.sort_values("t").drop_duplicates("t", keep="first").reset_index(drop=True)
+    return preprocess_trajectory_dataset(df)
 
 
 def resample_trajectory(
@@ -531,6 +533,7 @@ def run_prediction(
         _plot_prediction(pred, output_columns, trajectory_output_dir, model_name, show_plots)
         _plot_prediction_with_current(pred, resampled, output_columns, trajectory_output_dir, model_name, show_plots)
         _plot_input_trajectories(resampled, input_columns, trajectory_output_dir, show_plots)
+        _plot_ua_sa_criteria(pred, trajectory_output_dir, show_plots)
 
     if not predictions:
         raise ValueError("No predictions were generated.")
@@ -630,6 +633,58 @@ def _plot_prediction_with_current(
     fig.suptitle(f"free-run prediction with current: {trajectory_id}")
     fig.tight_layout(rect=[0, 0, 1, 0.97])
     fig.savefig(output_dir / f"{trajectory_id}_free_run_prediction_with_current.png", dpi=150)
+    if show_plots:
+        plt.show()
+    else:
+        plt.close(fig)
+
+
+def _plot_ua_sa_criteria(
+    prediction: pd.DataFrame,
+    output_dir: Path,
+    show_plots: bool,
+) -> None:
+    trajectory_id = prediction["trajectory_id"].iloc[0]
+    u_criteria = np.array([0.5, 1.5, 2.5])
+    sa_criteria = np.array([0.032, 0.062, 0.092])
+    sa_criteria2 = sa_criteria + 0.015
+
+    fig, ax = plt.subplots(figsize=(9, 6))
+    ax.fill_between(u_criteria, 0.00, sa_criteria, color="tab:green", alpha=0.2)
+    ax.fill_between(u_criteria, sa_criteria, sa_criteria2, color="tab:blue", alpha=0.3)
+    ax.fill_between(u_criteria, sa_criteria2, 0.16, color="tab:red", alpha=0.3)
+    ax.plot(
+        u_criteria, sa_criteria, marker="+", color="black", linestyle="--",
+        label="Criteria",
+    )
+    ax.plot(
+        u_criteria, sa_criteria2, marker="+", color="tab:blue", linestyle="--",
+        label="Criteria + 0.015",
+    )
+
+    pred_mask = np.isfinite(prediction[["ua_pred", "sa_pred"]]).all(axis=1)
+    ax.scatter(
+        prediction.loc[pred_mask, "ua_pred"], prediction.loc[pred_mask, "sa_pred"],
+        marker="s", color="tab:brown", s=16, alpha=0.6,
+        label="Prediction", zorder=3,
+    )
+    true_mask = np.isfinite(prediction[["ua", "sa"]]).all(axis=1)
+    if true_mask.any():
+        ax.scatter(
+            prediction.loc[true_mask, "ua"], prediction.loc[true_mask, "sa"],
+            marker="o", facecolors="none", edgecolors="black", s=20, alpha=0.6,
+            label="True", zorder=4,
+        )
+
+    ax.set_xlim(0, 6)
+    ax.set_ylim(0, 0.16)
+    ax.set_xlabel("u_anode (m/s)")
+    ax.set_ylabel("s_a ACH H2-out")
+    ax.set_title(f"ua-sa prediction: {trajectory_id}")
+    ax.grid(True)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(output_dir / f"{trajectory_id}_free_run_ua_sa_criteria.png", dpi=150)
     if show_plots:
         plt.show()
     else:
